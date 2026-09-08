@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+.env
+.env.*
+*.key
+*.p12
+*.pfx
+*.sqlite*
+binding.json
+bindings.json
+self-service.json
+rotation-recovery.json
+mcp-before.json
+connections/
+backups/
