@@ -13,8 +13,8 @@ The user chooses the project and knowledge bases. The gateway exposes configured
 
 ## Connect
 
-1. Identify the target Agent and its actual MCP config format. WorkBuddy defaults to `~/.workbuddy/mcp.json`; `generic-json` is only for clients with the same `mcpServers`/`command`/`args` format. Do not write JSON into a TOML client.
-2. Use Python 3.10+ and the whole Skill folder, including `assets/ragflow-project-mcp-ca.crt`. Self-service needs only the Python standard library. Read [references/client-adapters.md](references/client-adapters.md) for runtime/trust details.
+1. Honor the user's target Agent; otherwise identify the current Agent from reliable context. Ask when ambiguous, especially with multiple clients installed. Never default to WorkBuddy or infer the target solely from an existing config file. `connect` requires `--client codex`, `--client workbuddy`, or `--client generic-json`. Check the actual config location and format before mutation. Read [references/client-adapters.md](references/client-adapters.md) for client routing and unsupported formats.
+2. Use Python 3.11+ for Codex TOML configuration, or Python 3.10+ for JSON clients, and the whole Skill folder including `assets/ragflow-project-mcp-ca.crt`. Only the Python standard library is needed.
 3. Run `scripts/self_service.py projects`. Present actual project names and IDs; ask for a selection if the request did not specify one.
 4. Run `scripts/self_service.py knowledge-bases --project <id>`. Present returned knowledge bases. Use repeatable `--knowledge-base` for choices, or `--all-knowledge-bases` only when the user requested all. No silent all-dataset default.
 5. Run `connect` with the selection. It creates a binding without a control token, checks MCP initialization and tool schema, copies runtime and CA into a private local directory, then backs up and updates the Agent config. Add `--probe-query` for a relevant retrieval check. Do not silently replace an existing server entry.
@@ -25,13 +25,13 @@ Commands are relative to the installed Skill folder; resolve absolute paths when
 ```powershell
 python scripts/self_service.py projects
 python scripts/self_service.py knowledge-bases --project librechat
-python scripts/self_service.py connect --client workbuddy --project librechat --knowledge-base "selected-id"
+python scripts/self_service.py connect --client codex --project librechat --knowledge-base "selected-id"
 ```
 
-For all CURRENT knowledge bases in a project:
+The example targets Codex; choose the actual client's option, not this example by default. For all CURRENT knowledge bases in a project, only when the user requests all:
 
 ```powershell
-python scripts/self_service.py connect --project librechat --all-knowledge-bases
+python scripts/self_service.py connect --client codex --project librechat --all-knowledge-bases
 ```
 
 Default gateway: `https://172.16.3.173:8892`. The helper loads the bundled CA automatically: no OS certificate import, RAGFlow password or control-credential prompt. Other deployments can override `--control-url` and `--ca-file`. Preserve full certificate verification.
@@ -46,6 +46,8 @@ python scripts/self_service.py disconnect --server-name ragflow-librechat
 ```
 
 Metadata: `~/.ragflow-project-connect/self-service.json`; protected runtime and credentials: its `connections/` directory. The adapter reloads credentials for each request. Rotation uses the existing unexpired credential automatically. Expired/revoked connections must be disconnected and recreated. `status` reports local metadata; `verify` checks the remote binding.
+
+Use different `--server-name` values when connecting multiple Agents to the same project; each connection has its own credential and lifecycle. Disconnect uses the recorded client type; older records remain JSON-compatible.
 
 Existing HTTP/control-token connections still use `scripts/project_connect.py` and separate metadata. See [references/client-adapters.md](references/client-adapters.md). Do not silently migrate existing connections.
 
