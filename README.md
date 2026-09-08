@@ -10,7 +10,7 @@
 帮我安装这个 Skill：npx skills add 040510/ragflow-project-connect --skill ragflow-project-connect -y -g
 ```
 
-安装需要 Node.js/npm、Git，以及 GitHub 和 npm 网络访问。Skill 的连接脚本需要 Python 3.10+，不需要额外 pip 依赖。
+安装需要 Node.js/npm、Git，以及 GitHub 和 npm 网络访问。Codex 配置需要 Python 3.11+；JSON 客户端需要 Python 3.10+。不需要额外 pip 依赖。
 
 `skills` 安装器的安装位置取决于其对当前 Agent 的支持和识别结果。确认目标 Agent 已识别 `ragflow-project-connect`；若未识别，按该 Agent 的 Skill 安装方式导入完整文件夹。不要只导入 SKILL.md。
 
@@ -19,13 +19,15 @@
 安装 Skill 不会自动绑定任何知识库。安装完成后对 Agent 说：
 
 ```text
-使用 ragflow-project-connect，为我的 WorkBuddy 创建 RAGFlow MCP 连接。
-先列出项目，再列出我选定项目下的知识库，让我选择范围后再创建连接。
+使用 ragflow-project-connect，为我当前使用的 Agent 创建 RAGFlow MCP 连接。
+先确认客户端类型，再列出项目和知识库，让我选择范围后完成配置和检索验证。
 ```
 
 Skill 会加载附带的 CA 公共证书，创建独立连接凭据，检查 MCP 初始化和工具定义，然后备份并更新客户端配置。用户无需手动安装 CA、领取控制凭据或提供 RAGFlow 密码。提供测试问题后可进一步验证真实检索。
 
-当前自动配置支持 WorkBuddy 和采用兼容 JSON 配置格式的客户端。其他客户端需要核对配置格式，且必须支持本地 stdio MCP。
+可以指定 Codex、WorkBuddy 或其他 Agent，不再默认 WorkBuddy。当前自动配置支持 Codex 的 TOML、WorkBuddy 的 JSON，以及相同 mcpServers 格式的 JSON 客户端。无法确定当前 Agent 时会先询问；其他格式需要按客户端官方文档适配，不能直接套用 JSON。客户端必须支持本地 stdio MCP。
+
+Codex 使用 `--client codex`，默认配置为 `$CODEX_HOME/config.toml`（未设置时为 `~/.codex/config.toml`）；WorkBuddy 使用 `--client workbuddy`。兼容 JSON 的其他客户端使用 `--client generic-json --config <配置文件路径>`。同一项目连接多个 Agent 时使用不同的 `--server-name`。
 
 配置完成后重新加载客户端 MCP，必要时重启 Agent。之后直接提问：
 
