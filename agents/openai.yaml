@@ -1,0 +1,4 @@
+interface:
+  display_name: "RAGFlow Project Connect"
+  short_description: "Connect an Agent to selected RAGFlow knowledge bases"
+  default_prompt: "Use $ragflow-project-connect to show the live catalog and connect my Agent to selected knowledge bases with automatic CA and credential setup."
