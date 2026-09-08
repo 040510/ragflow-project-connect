@@ -32,12 +32,15 @@ def load(path, default=None):
 
 
 def write(path, value):
+    write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def write_text(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
+            handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
@@ -88,6 +91,92 @@ def agent_config(path):
     return config
 
 
+def codex_config(path):
+    try:
+        import tomllib
+    except ImportError:
+        raise ConnectionError("Codex configuration requires Python 3.11+ (tomllib)") from None
+    try:
+        text = path.read_text(encoding="utf-8-sig") if path.exists() else ""
+        config = tomllib.loads(text)
+    except (OSError, ValueError):
+        raise ConnectionError(f"Cannot read TOML configuration: {path}") from None
+    if not isinstance(config.get("mcp_servers", {}), dict):
+        raise ConnectionError("Expected a TOML mcp_servers table")
+    return text, config
+
+
+def client_entry(path, client, name):
+    if client == "codex":
+        return codex_config(path)[1].get("mcp_servers", {}).get(name)
+    return agent_config(path)["mcpServers"].get(name)
+
+
+def codex_block(name, entry):
+    lines = [f"# BEGIN ragflow-project-connect {name}",
+             "[mcp_servers." + json.dumps(name) + "]"]
+    lines.extend(key + " = " + json.dumps(value, ensure_ascii=False) for key, value in entry.items())
+    lines.append(f"# END ragflow-project-connect {name}")
+    return "\n".join(lines) + "\n"
+
+
+def update_client(path, client, name, entry, remove=False):
+    actual = client_entry(path, client, name)
+    if remove and actual is None:
+        return
+    if (remove and actual != entry) or (not remove and actual is not None):
+        raise ConnectionError("Client entry changed or already exists; refusing to overwrite/remove it")
+    if client != "codex":
+        config = agent_config(path)
+        if remove:
+            del config["mcpServers"][name]
+        else:
+            config["mcpServers"][name] = entry
+        write(path, config)
+        return
+    import tomllib
+    text, before = codex_config(path)
+    block = codex_block(name, entry)
+    if remove:
+        if text.count(block) != 1:
+            raise ConnectionError("Managed Codex block was reformatted; remove it manually after verification")
+        updated = text.replace(block, "", 1)
+    else:
+        updated = text + ("\n\n" if text else "") + block
+    # Only our appended table may change; preserve all other TOML values and comments.
+    try:
+        after = tomllib.loads(updated)
+    except ValueError:
+        raise ConnectionError("Cannot safely update this TOML layout") from None
+    expected = dict(before.get("mcp_servers", {}))
+    if remove:
+        del expected[name]
+    else:
+        expected[name] = entry
+    if after.get("mcp_servers", {}) != expected:
+        raise ConnectionError("TOML update would alter unrelated MCP configuration")
+    if {k: v for k, v in before.items() if k != "mcp_servers"} != {k: v for k, v in after.items() if k != "mcp_servers"}:
+        raise ConnectionError("TOML update would alter unrelated settings")
+    write_text(path, updated)
+
+
+def client_path(args):
+    if args.config:
+        path = Path(args.config).expanduser().resolve()
+    elif args.client == "codex":
+        path = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser().resolve() / "config.toml"
+    elif args.client == "workbuddy":
+        path = Path.home() / ".workbuddy" / "mcp.json"
+    else:
+        raise ConnectionError("generic-json requires --config")
+    if args.client == "codex" and path.suffix.lower() != ".toml":
+        raise ConnectionError("Codex requires a .toml configuration file")
+    if args.client != "codex" and path.suffix.lower() == ".toml":
+        raise ConnectionError("JSON clients cannot use a TOML configuration file")
+    client_entry(path, args.client, "__preflight__")
+    return path
+
+
 def descriptor(response, base_url, project_id, kb_ids):
     binding, mcp = response.get("binding", {}), response.get("mcp", {})
     if binding.get("project_id") != project_id or set(binding.get("knowledge_base_ids", [])) != set(kb_ids) or binding.get("scopes") != ["knowledge:retrieve"]:
@@ -102,6 +191,7 @@ def descriptor(response, base_url, project_id, kb_ids):
 
 
 def connect(args):
+    config_path = client_path(args)
     client = Transport(args.control_url, args.ca_file, args.timeout)
     project = choose_project(items(client.request("GET", PREFIX + "/projects"), "projects"), args.project)
     available = items(client.request("GET", PREFIX + "/projects/" + quote(project["id"], safe="") + "/knowledge-bases"), "knowledge_bases")
@@ -121,13 +211,9 @@ def connect(args):
     name = args.server_name or "ragflow-" + project["id"]
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", name):
         raise ConnectionError("Invalid MCP server name")
-    config_path = Path(args.config).expanduser().resolve() if args.config else Path.home() / ".workbuddy" / "mcp.json"
-    if args.client == "generic-json" and not args.config:
-        raise ConnectionError("generic-json requires --config")
-    config = agent_config(config_path)
     registry_path = Path(args.home).expanduser().resolve() / "self-service.json"
     registry = load(registry_path, {})
-    if name in config["mcpServers"] or name in registry:
+    if client_entry(config_path, args.client, name) is not None or name in registry:
         raise ConnectionError("Connection name already exists; select another --server-name or disconnect it first")
     root = registry_path.parent / "connections" / uuid.uuid4().hex
     private_directory(root)
@@ -149,23 +235,26 @@ def connect(args):
         write(binding_file, binding)
         verification = verify(client, binding, args.probe_query)
         # Re-read immediately before writing to preserve unrelated client changes.
-        config = agent_config(config_path)
-        if name in config["mcpServers"]:
+        if client_entry(config_path, args.client, name) is not None:
             raise ConnectionError("Client configuration changed during connection")
         if config_path.exists():
-            config_backup = root / "mcp-before.json"
+            config_backup = root / ("mcp-before.toml" if args.client == "codex" else "mcp-before.json")
             shutil.copy2(config_path, config_backup)
-        entry = {"command": sys.executable, "args": [str(root / "stdio_adapter.py"), "--binding", str(binding_file)], "disabled": False}
-        config["mcpServers"][name] = entry
-        write(config_path, config)
+        entry = {"command": sys.executable, "args": [str(root / "stdio_adapter.py"), "--binding", str(binding_file)]}
+        if args.client == "codex":
+            entry.update(enabled=True, startup_timeout_sec=30, tool_timeout_sec=180)
+        else:
+            entry["disabled"] = False
+        update_client(config_path, args.client, name, entry)
         installed = True
-        registry[name] = {"binding_file": str(binding_file), "config_path": str(config_path), "config_entry": entry, "project": project["name"]}
+        registry[name] = {"binding_file": str(binding_file), "config_path": str(config_path), "config_entry": entry, "project": project["name"], "client": args.client}
         write(registry_path, registry)
     except Exception:
         if installed:
-            current = agent_config(config_path)
-            current["mcpServers"].pop(name, None)
-            write(config_path, current)
+            try:
+                update_client(config_path, args.client, name, entry, remove=True)
+            except Exception:
+                print(f"Client cleanup needs attention: {config_path}", file=sys.stderr)
         try:
             binding_id = response["binding"]["id"]
             client.request("DELETE", PREFIX + "/bindings/" + quote(binding_id, safe=""), token=response["mcp"]["access_token"])
@@ -176,7 +265,7 @@ def connect(args):
         raise
     print(json.dumps({"connected": name, "project": project["name"], "knowledge_base_count": len(ids),
                       "transport": "stdio", "expires_at": binding["expires_at"], "verification": verification,
-                      "config": str(config_path)}, ensure_ascii=False))
+                      "client": args.client, "config": str(config_path)}, ensure_ascii=False))
 
 
 def operate(args):
@@ -186,7 +275,7 @@ def operate(args):
         values = {}
         for name, item in registry.items():
             binding = load(Path(item["binding_file"]))
-            values[name] = {"project": item["project"], "expires_at": binding["expires_at"], "knowledge_base_count": len(binding["knowledge_base_ids"])}
+            values[name] = {"project": item["project"], "client": item.get("client", "generic-json"), "expires_at": binding["expires_at"], "knowledge_base_count": len(binding["knowledge_base_ids"])}
         print(json.dumps(values, ensure_ascii=False))
         return
     if args.server_name not in registry:
@@ -211,8 +300,8 @@ def operate(args):
         print(json.dumps({"rotated": args.server_name, "expires_at": updated["expires_at"], "verification": verify(client, updated)}))
     elif args.command == "disconnect":
         config_path = Path(item["config_path"])
-        config = agent_config(config_path)
-        actual = config["mcpServers"].get(args.server_name)
+        target_client = item.get("client", "generic-json")
+        actual = client_entry(config_path, target_client, args.server_name)
         if actual is not None and actual != item["config_entry"]:
             raise ConnectionError("Client entry was changed externally; refusing to remove it")
         try:
@@ -220,8 +309,7 @@ def operate(args):
         except ConnectionError as exc:
             if exc.status not in (401, 404):
                 raise
-        config["mcpServers"].pop(args.server_name, None)
-        write(config_path, config)
+        update_client(config_path, target_client, args.server_name, item["config_entry"], remove=True)
         file.unlink(missing_ok=True)
         del registry[args.server_name]
         write(registry_path, registry)
@@ -240,7 +328,7 @@ def build_parser():
         if command != "projects":
             p.add_argument("--project", required=command == "knowledge-bases")
         if command == "connect":
-            p.add_argument("--client", choices=["workbuddy", "generic-json"], default="workbuddy")
+            p.add_argument("--client", choices=["codex", "workbuddy", "generic-json"], required=True)
             p.add_argument("--config")
             p.add_argument("--server-name")
             p.add_argument("--agent-name")
